@@ -272,7 +272,7 @@ class FlatArguments:
         default=None, metadata={"help": "Save the model to the Hub under this name. E.g allenai/your-model"}
     )
     gradient_checkpointing: bool = field(
-        default=False, metadata={"help": "Turn on gradient checkpointing. Saves memory but slows training."}
+        default=True, metadata={"help": "Turn on gradient checkpointing. Saves memory but slows training."}
     )
     use_liger_kernel: bool = field(default=False, metadata={"help": "Whether to use LigerKernel for training."})
     max_train_steps: Optional[int] = field(
@@ -316,7 +316,7 @@ class FlatArguments:
     """The revision of the saved model in the Hugging Face Hub (can be autoset if not given)"""
     hf_repo_url: Optional[str] = None
     """The url of the saved model in the Hugging Face Hub (will be autoset)"""
-    try_launch_beaker_eval_jobs: bool = True
+    try_launch_beaker_eval_jobs: bool = False
     """Whether to launch beaker evaluation jobs after training"""
     hf_metadata_dataset: Optional[str] = "allenai/tulu-3-evals"
     """What dataset to upload the metadata to. If unset, don't upload metadata"""
@@ -324,7 +324,7 @@ class FlatArguments:
     """Immediately exit after caching the dataset"""
 
     # Ai2 specific settings
-    try_auto_save_to_beaker: bool = True
+    try_auto_save_to_beaker: bool = False
     """Whether to try to save the model to Beaker dataset `/output` after training"""
     gs_bucket_path: Optional[str] = None
     """The path to the gs bucket to save the model to"""
@@ -905,8 +905,8 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                             os.path.join(get_last_checkpoint_path(args, incomplete=True), "COMPLETED"), "w"
                         ) as f:
                             f.write("COMPLETED")  # annoyingly, empty files arent uploaded by beaker.
-                        if accelerator.is_local_main_process:
-                            clean_last_n_checkpoints(args.output_dir, args.keep_last_n_checkpoints)
+                        # if accelerator.is_local_main_process:
+                        #     clean_last_n_checkpoints(args.output_dir, args.keep_last_n_checkpoints)
                         accelerator.wait_for_everyone()
 
                 if completed_steps >= args.max_train_steps:
@@ -920,16 +920,16 @@ def main(args: FlatArguments, tc: TokenizerConfig):
             # use this to mark the checkpoint as completely saved, to avoid restoring from garbled checkpoints
             with open(os.path.join(get_last_checkpoint_path(args, incomplete=True), "COMPLETED"), "w") as f:
                 f.write("COMPLETED")  # annoyingly, empty files arent uploaded by beaker.
-            if accelerator.is_local_main_process:
-                clean_last_n_checkpoints(args.output_dir, args.keep_last_n_checkpoints)
+            # if accelerator.is_local_main_process:
+            #     clean_last_n_checkpoints(args.output_dir, args.keep_last_n_checkpoints)
             accelerator.wait_for_everyone()
 
     if args.output_dir is not None:
         save_with_accelerate(accelerator, model, tokenizer, args.output_dir, args.use_lora)
 
     # remove all checkpoints to save space
-    if accelerator.is_local_main_process:
-        clean_last_n_checkpoints(args.output_dir, keep_last_n_checkpoints=0)
+    # if accelerator.is_local_main_process:
+    #     clean_last_n_checkpoints(args.output_dir, keep_last_n_checkpoints=0)
 
     if (
         args.try_auto_save_to_beaker
