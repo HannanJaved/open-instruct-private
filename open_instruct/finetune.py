@@ -371,38 +371,43 @@ def evaluate_validation_loss(model, dataloader, accelerator, embedding_size, arg
     total_tokens = 0
     with torch.no_grad():
         for batch in dataloader:
-            if "attention_mask" in batch:
-                tokens = batch["attention_mask"].sum().item()
-            elif "position_ids" in batch:
-                tokens = batch["position_ids"].numel()
-            elif "cu_seq_lens_q" in batch:
-                tokens = batch["cu_seq_lens_q"][-1].item()
-            else:
-                raise ValueError(f"Expected attention_mask or position_ids or cu_seq_lens_q in batch, found {batch=}")
             # Move batch to device if not already
-            print(f"Evaluating batch with {tokens} tokens")
             for k in batch:
                 if isinstance(batch[k], torch.Tensor):
                     batch[k] = batch[k].to(accelerator.device)
+
             outputs = model(**batch, use_cache=False)
+
             if args.reduce_loss == "mean":
-                loss = outputs.loss
-                total_loss += loss.item() * tokens
+                # Model returns mean loss per token, so we need to get the actual token count
+                # to properly accumulate the total loss
+                labels = batch["labels"]
+                # Count only non-padding tokens (those not equal to -100)
+                tokens = labels.ne(-100).sum().item()
+                # Accumulate: mean_loss * num_tokens = total_loss_for_batch
+                total_loss += outputs.loss.item() * tokens
+                total_tokens += tokens
             else:
+                # reduce_loss is "sum" - manually calculate sum loss
                 logits = outputs.logits
                 labels = batch["labels"]
+                # Shift so that tokens < n predict n
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels[..., 1:].contiguous()
                 del logits
+
+                # Flatten the tokens
                 loss_fct = torch.nn.CrossEntropyLoss(reduction="sum")
                 shift_logits = shift_logits.view(-1, embedding_size)
                 shift_labels = shift_labels.view(-1).to(shift_logits.device)
                 loss = loss_fct(shift_logits, shift_labels)
                 del shift_logits
-                total_loss += loss.item()
-                print(f"Total loss: {total_loss}, batch loss: {loss.item()}")
+
+                # Count only non-padding tokens
                 tokens = shift_labels.ne(-100).sum().item()
-            total_tokens += tokens
+                total_loss += loss.item()
+                total_tokens += tokens
+
     model.train()
     avg_loss = total_loss / max(total_tokens, 1)
     return avg_loss
@@ -919,20 +924,18 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                 # --- Validation loss logging ---
                 should_run_validation = (
                     args.validation_steps is not None
+                    and args.validation_steps > 0
                     and test_dataloader is not None
                     and completed_steps > 0
                     and completed_steps % args.validation_steps == 0
-                    # and accelerator.is_main_process
                 )
 
-                if should_run_validation and accelerator.is_main_process:
+                if should_run_validation:
                     logger.info("Running validation loss evaluation...")
                     val_loss = evaluate_validation_loss(model, test_dataloader, accelerator, embedding_size, args)
                     logger.info(f"  Step: {completed_steps}, Validation Loss: {val_loss}")
                     if args.with_tracking:
                         accelerator.log({"validation_loss": val_loss}, step=completed_steps)
-                    
-                if should_run_validation:
                     accelerator.wait_for_everyone()
                 # --- End validation loss logging ---
                 if isinstance(checkpointing_steps, int):
