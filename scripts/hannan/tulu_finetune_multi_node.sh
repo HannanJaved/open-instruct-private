@@ -88,12 +88,14 @@ srun torchrun \
       --reduce_loss sum \
       --report_to wandb \
       --with_tracking \
-      --wandb_project_name Tulu3-Full-Runs \
+      --wandb_project_name instruction-tuning \
       --wandb_entity openeurollm-project \
       --logging_steps 1 \
       --validation_split_percentage 5 \
       --validation_steps 10 \
-      --dataset_skip_cache False
+      --dataset_skip_cache False \
+      --do_not_randomize_output_dir True \
+      --exp_name "Llama-3.1-8B_Tulu3_Full_SFT_Run1"
 # "
  
 
