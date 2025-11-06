@@ -1,9 +1,9 @@
 #!/bin/bash
 # Multi-node distributed training configuration with DeepSpeed ZeRO-3:
 # - 4 nodes x 4 GPUs = 16 total GPUs
-# - Per-device batch size: 2
-# - Gradient accumulation steps: 4
-# - Effective batch size: 2 x 16 x 4 = 128 (exact target)
+# - Per-device batch size: 1
+# - Gradient accumulation steps: 8
+# - Effective batch size: 1 x 16 x 8 = 128 (exact target)
 #
 # KEY MEMORY OPTIMIZATIONS:
 # 1. DeepSpeed ZeRO-3: Shards model parameters, gradients, and optimizer states
@@ -11,7 +11,7 @@
 # 3. Flash Attention 2: More memory-efficient attention computation
 # 4. BF16 mixed precision: Reduces memory footprint
 #
-#SBATCH --job-name=full_tulu_SFT
+#SBATCH --job-name=full_tulu_SFT_2
 #SBATCH --output=/data/horse/ws/hama901h-BFTranslation/logs/Tulu/Finetuning/SFT_DPO/%x.out
 #SBATCH --error=/data/horse/ws/hama901h-BFTranslation/logs/Tulu/Finetuning/SFT_DPO/%x.err
 #SBATCH --nodes=4
@@ -71,7 +71,9 @@ srun torchrun \
     --rdzv_endpoint="$RDZV_HOST:$RDZV_PORT" \
     open-instruct/open_instruct/finetune.py \
       --model_name_or_path /data/horse/ws/hama901h-BFTranslation/checkpoints/meta-llama/Llama-3.1-8B \
-      --output_dir /data/horse/ws/hama901h-BFTranslation/checkpoints/meta-llama/Llama-3.1-8B/tulu3/w_checkpoints/full_run/SFT/ \
+      --dataset_mixer_list allenai/tulu-3-sft-mixture 1.0 \
+      --dataset_mixer_list_splits train \
+      --output_dir /data/horse/ws/hama901h-BFTranslation/checkpoints/meta-llama/Llama-3.1-8B/tulu3/w_checkpoints/full_run/SFT_2/ \
       --num_train_epochs 2 \
       --per_device_train_batch_size 1 \
       --max_seq_length 4096 \
@@ -82,6 +84,7 @@ srun torchrun \
       --lr_scheduler_type linear \
       --warmup_ratio 0.03 \
       --weight_decay 0.0 \
+      --clip_grad_norm 1.0 \
       --gradient_checkpointing True \
       --use_flash_attn True \
       --use_slow_tokenizer \
@@ -96,7 +99,7 @@ srun torchrun \
       --dataset_skip_cache False \
       --do_not_randomize_output_dir True \
       --add_seed_and_date_to_exp_name False \
-      --exp_name "Llama-3.1-8B_Tulu3_Full_SFT_Run1"
+      --exp_name "Llama-3.1-8B_Tulu3_Full_SFT_Run2"
 # "
  
 

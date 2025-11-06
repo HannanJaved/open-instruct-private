@@ -89,6 +89,8 @@ srun torchrun \
         --wandb_entity openeurollm-project \
         --exp_name "Llama-3.1-8B_Tulu3_Full_DPO_Run1" \
         --add_seed_and_date_to_exp_name False \
+        --checkpointing_steps 100 \
+        --dataset_skip_cache True \
         # --use_lora True \
         # --lora_rank 256 \
         # --lora_alpha 64
