@@ -677,7 +677,7 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                     config=config,
                     trust_remote_code=tc.trust_remote_code,
                     low_cpu_mem_usage=args.low_cpu_mem_usage,
-                    # use_flash_attention_2=True if args.use_flash_attn else False,
+                    torch_dtype=torch.bfloat16,
                     attn_implementation="flash_attention_2" if args.use_flash_attn else "eager",
                 )
         else:
