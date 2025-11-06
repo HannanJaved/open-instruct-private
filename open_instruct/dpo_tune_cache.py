@@ -298,6 +298,18 @@ class FlatArguments:
     )
     concatenated_forward: bool = True
     """Whether to concatenate chosen and rejected for DPO training; True is good but you can set to False for saving memory."""
+    validation_steps: Optional[int] = field(
+        default=0,
+        metadata={"help": "Run validation every X steps (using test_dataloader). Set to None or 0 to disable."}
+    )
+    validation_split_percentage: Optional[int] = field(
+        default=0,
+        metadata={"help": "The percentage of the train set to use as validation set"},
+    )
+    add_seed_and_date_to_exp_name: bool = field(
+        default=False, metadata={"help": "Whether to add seed and date to experiment name."}
+    )
+    
 
     # Experiment tracking
     with_tracking: bool = False
@@ -346,6 +358,71 @@ class FlatArguments:
             raise ValueError("Cannot provide two dataset selection mechanisms.")
         if self.try_launch_beaker_eval_jobs and not self.push_to_hub:
             raise ValueError("Cannot launch Beaker evaluation jobs without pushing to the Hub.")
+
+
+def evaluate_dpo_validation_loss(
+    model: torch.nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    accelerator: Accelerator,
+    args: FlatArguments,
+    average_log_prob: bool,
+    forward_fn: Callable,
+):
+    """
+    Evaluate DPO validation loss on a held-out dataset.
+    """
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            # Forward pass to get policy logprobs
+            policy_chosen_logps, policy_rejected_logps, aux_loss = forward_fn(
+                model, batch, average_log_prob=average_log_prob, output_router_logits=args.load_balancing_loss
+            )
+            
+            # Compute loss based on DPO loss type
+            if args.dpo_loss_type == "simpo":
+                losses, _, _ = simpo_loss(
+                    policy_chosen_logps,
+                    policy_rejected_logps,
+                    beta=args.dpo_beta,
+                    gamma_beta_ratio=args.dpo_gamma_beta_ratio,
+                    label_smoothing=args.dpo_label_smoothing,
+                )
+            elif args.dpo_loss_type == "wpo":
+                losses, _, _ = wpo_loss(
+                    policy_chosen_logps,
+                    policy_rejected_logps,
+                    batch["chosen_labels"],
+                    batch["rejected_labels"],
+                    beta=args.dpo_beta,
+                    label_smoothing=args.dpo_label_smoothing,
+                )
+            else:
+                # For DPO and DPO_norm, we need reference logprobs
+                # We'll use the policy model itself as reference for validation
+                # This is a simplification - ideally you'd cache reference logprobs for validation too
+                reference_chosen_logps = policy_chosen_logps.detach()
+                reference_rejected_logps = policy_rejected_logps.detach()
+                losses, _, _ = dpo_loss(
+                    policy_chosen_logps,
+                    policy_rejected_logps,
+                    reference_chosen_logps,
+                    reference_rejected_logps,
+                    beta=args.dpo_beta,
+                    label_smoothing=args.dpo_label_smoothing,
+                )
+            
+            loss = losses.mean()
+            batch_size = len(batch["chosen_input_ids"])
+            total_loss += loss.item() * batch_size
+            total_samples += batch_size
+    
+    model.train()
+    avg_loss = total_loss / max(total_samples, 1)
+    return avg_loss
 
 
 def get_cache_ref_logprobs(
@@ -421,7 +498,10 @@ def main(args: FlatArguments, tc: TokenizerConfig):
 
     # ------------------------------------------------------------
     # Set up runtime variables
-    args.run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
+    if args.add_seed_and_date_to_exp_name:
+        args.run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
+    else:
+        args.run_name = args.exp_name if args.run_name is None else args.run_name
     args.output_dir = os.path.join(args.output_dir, args.run_name)
     args.dataset_local_cache_dir = os.path.abspath(args.dataset_local_cache_dir)
     if is_beaker_job():
@@ -513,8 +593,21 @@ def main(args: FlatArguments, tc: TokenizerConfig):
             dataset_local_cache_dir=args.dataset_local_cache_dir,
             dataset_skip_cache=args.dataset_skip_cache,
         )
+
+        if args.validation_split_percentage and args.validation_split_percentage > 0:
+            train_val_split = train_dataset.train_test_split(
+                test_size=args.validation_split_percentage / 100.0, shuffle=False, seed=args.seed
+            )
+            train_dataset = train_val_split["train"]
+            test_dataset = train_val_split["test"]
+        else:
+            test_dataset = None
+
         train_dataset = train_dataset.shuffle(seed=args.seed)
         train_dataset.set_format(type="pt")
+        if test_dataset:
+            test_dataset.set_format(type="pt")
+
     if accelerator.is_main_process:
         visualize_token(train_dataset[0][CHOSEN_INPUT_IDS_KEY], tokenizer)
 
@@ -555,6 +648,7 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                     quantization_config=bnb_config,
                     device_map=device_map,
                     torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2" if args.use_flash_attn else "eager",
                     # use_flash_attention_2=True if args.use_flash_attn else False,
                 )
             elif args.use_liger_kernel:
@@ -570,6 +664,7 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                     config=config,
                     trust_remote_code=tc.trust_remote_code,
                     low_cpu_mem_usage=args.low_cpu_mem_usage,
+                    attn_implementation="flash_attention_2" if args.use_flash_attn else "eager",
                     # use_flash_attention_2=True if args.use_flash_attn else False,
                     # liger-kernel specific args
                     fused_linear_cross_entropy=False,  # don't fuse the linear layer with CE loss, since we want logits
@@ -583,6 +678,7 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                     trust_remote_code=tc.trust_remote_code,
                     low_cpu_mem_usage=args.low_cpu_mem_usage,
                     # use_flash_attention_2=True if args.use_flash_attn else False,
+                    attn_implementation="flash_attention_2" if args.use_flash_attn else "eager",
                 )
         else:
             logger.info("Training new model from scratch")
@@ -636,6 +732,12 @@ def main(args: FlatArguments, tc: TokenizerConfig):
         collate_fn=DataCollatorForSeq2SeqDPO(tokenizer=tokenizer, model=model, padding="longest"),
         batch_size=args.per_device_train_batch_size,
     )
+    test_dataloader = DataLoader(
+        test_dataset,
+        shuffle=False,
+        collate_fn=DataCollatorForSeq2SeqDPO(tokenizer=tokenizer, model=model, padding="longest"),
+        batch_size=args.per_device_train_batch_size,
+    ) if test_dataset else None
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -694,6 +796,9 @@ def main(args: FlatArguments, tc: TokenizerConfig):
     )
     print("=============accelerate prepared")
     print_gpu_stats(init_gpu_memory)
+
+    if test_dataloader is not None:
+        test_dataloader = accelerator.prepare(test_dataloader)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -893,6 +998,26 @@ def main(args: FlatArguments, tc: TokenizerConfig):
                         accelerator.log(metrics_to_log, step=completed_steps)
                     # Reset the local metrics
                     local_metrics.zero_()
+
+                # --- Validation loss logging ---
+                should_run_validation = (
+                    args.validation_steps is not None
+                    and args.validation_steps > 0
+                    and test_dataloader is not None
+                    and completed_steps > 0
+                    and completed_steps % args.validation_steps == 0
+                )
+
+                if should_run_validation:
+                    logger.info("Running DPO validation loss evaluation...")
+                    val_loss = evaluate_dpo_validation_loss(
+                        model, test_dataloader, accelerator, args, average_log_prob, forward_fn
+                    )
+                    logger.info(f"  Step: {completed_steps}, Validation Loss: {val_loss}")
+                    if args.with_tracking:
+                        accelerator.log({"validation_loss": val_loss}, step=completed_steps)
+                    accelerator.wait_for_everyone()
+                # --- End validation loss logging ---
 
                 if isinstance(checkpointing_steps, int):
                     if completed_steps % checkpointing_steps == 0:
